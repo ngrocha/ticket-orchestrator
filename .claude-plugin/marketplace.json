@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "ticket-tools",
+  "version": "1.0.0",
+  "description": "Small, focused Claude Code plugins for backlog-driven delivery.",
+  "owner": {
+    "name": "AUTHOR_NAME",
+    "email": "AUTHOR_EMAIL"
+  },
+  "plugins": [
+    {
+      "name": "ticket-orchestrator",
+      "source": "./plugins/ticket-orchestrator",
+      "description": "Opus orchestrates one backlog ticket end to end: locate, brief, delegate implementation to a Haiku worker, review the real diff, correct within a bounded loop, verify, and report.",
+      "category": "development",
+      "author": {
+        "name": "AUTHOR_NAME"
+      }
+    }
+  ]
+}

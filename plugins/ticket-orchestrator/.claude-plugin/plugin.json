@@ -1,0 +1,20 @@
+{
+  "name": "ticket-orchestrator",
+  "displayName": "Ticket Orchestrator",
+  "version": "1.0.0",
+  "description": "Run one backlog ticket end to end. The main Opus session plans, briefs, reviews and accepts; a Haiku subagent does the bounded implementation work.",
+  "author": {
+    "name": "AUTHOR_NAME",
+    "email": "AUTHOR_EMAIL"
+  },
+  "homepage": "https://github.com/OWNER/REPOSITORY",
+  "repository": "https://github.com/OWNER/REPOSITORY",
+  "license": "MIT",
+  "keywords": [
+    "backlog",
+    "ticket",
+    "orchestration",
+    "subagent",
+    "code-review"
+  ]
+}
