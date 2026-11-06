@@ -1,0 +1,3 @@
+interface:
+  display_name: "Feature PRD and Backlog Builder"
+  short_description: "Turn a feature description into PRD, ADR, and vertical-slice backlog Markdown."
