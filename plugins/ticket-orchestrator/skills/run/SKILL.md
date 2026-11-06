@@ -1,74 +1,67 @@
 ---
 name: run
-description: Run one backlog ticket end to end from the current repository. Locates the ticket, explores only what it needs, writes an implementation brief, delegates to the ticket-implementer Haiku subagent, reviews the actual diff, corrects within a bounded loop, runs verification, and reports.
+description: Run exactly one backlog ticket end to end. Plans with the main-session model, delegates bounded implementation to the ticket-implementer Haiku subagent, independently reviews the real diff, runs verification, performs at most two correction passes, and emits a structured telemetry record.
 argument-hint: "[ticket-id] [--backlog <path>] [--auto-commit]"
 disable-model-invocation: true
-allowed-tools: Read, Grep, Glob, Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git branch:*), Bash(ls:*)
+allowed-tools: Agent, Read, Grep, Glob, Bash(git status *), Bash(git diff *), Bash(git log *), Bash(git branch *), Bash(ls *)
 ---
 
 # Ticket orchestration
 
 Arguments: `$ARGUMENTS`
 
-You are the orchestrator. You run on the main session's model — launch Claude Code
-with Opus before invoking this skill. You own planning, architecture, design,
-risk, review and acceptance. The `ticket-implementer` subagent (Haiku) owns typing
-code inside a scope you define.
+You are the orchestrator. You run on the main session's model. Use Opus for this workflow when the user wants the Opus → Haiku architecture. You own ticket selection, exploration, architecture, design, risk, the implementation brief, independent review, acceptance and telemetry. The `ticket-implementer` subagent runs on Haiku and owns only the bounded code changes described in your brief.
 
-Process **exactly one ticket** per invocation. Work through the phases in order.
-Do not skip ahead, and do not run two tickets because the backlog looks ready.
+**One invocation handles exactly one ticket.** Follow the phases in order. Do not skip ahead, run multiple tickets, or let the worker select work.
+
+The `allowed-tools` frontmatter pre-approves only the listed tools/commands for this skill invocation; it is not a security sandbox or an exhaustive tool allowlist. Commands not pre-approved remain subject to the user's normal Claude Code permission rules. Never broaden permissions to avoid a prompt.
 
 ## Parsing the arguments
 
 - First bare token, if present, is the ticket ID.
 - `--backlog <path>` overrides backlog discovery.
-- `--auto-commit` means the user has pre-authorised a commit in Phase 7. Without
-  it, you must ask before committing.
-- No arguments at all is valid: discover the backlog and pick the first ready ticket.
+- `--auto-commit` means the user has pre-authorised a commit after successful acceptance, subject to the protected/default-branch safeguard in Phase 7.
+- No arguments is valid: discover the backlog and select the first ready ticket.
+- Unknown options or a missing value after `--backlog` are errors; ask the user to correct the invocation rather than guessing.
 
 ---
 
 ## Phase 1 — Locate and validate
 
-**Find the backlog.** Use `--backlog <path>` if given. Otherwise try, in order:
+### Find the backlog
+
+Use `--backlog <path>` if given. Otherwise try, in order:
 
 1. `BACKLOG.md`
 2. `docs/backlog.md`
 3. `backlog.md`
 
-If none exists, stop cleanly. Tell the user those three paths were checked and that
-they can pass `--backlog <path>`. Do not create a backlog, and do not fall back to
-guessing work from the codebase.
+If none exists, stop cleanly. Tell the user those three paths were checked and that they can pass `--backlog <path>`. Do not create a backlog or guess work from the codebase.
 
-**Find the ticket.** Read the backlog and locate the requested ID. Match tolerantly:
-the ID may sit in a heading, a bullet, a table row or a bold label. If the ID is not
-found, list the IDs you did find and stop.
+### Find and read the ticket
 
-If no ID was given, pick the first ticket whose status reads as ready (`Ready`,
-`To Do`, `Open`, an unchecked box, or no status at all) and whose dependencies are
-satisfied. **State clearly which ticket you selected and why** before continuing.
+- Read the backlog and locate the requested ID. Match tolerantly: the ID may appear in a heading, bullet, table row or bold label.
+- If the ID is not found, list the IDs you did find and stop.
+- If no ID was supplied, select the first ticket whose status is ready (`Ready`, `To Do`, `Open`, an unchecked box, or no status) and whose dependencies are satisfied. State which ticket you selected and why before continuing.
+- Extract the title, status, dependencies, description, acceptance criteria and notes. Missing fields are normal; do not invent them.
 
-**Read the ticket.** Extract whatever exists: title, status, dependencies,
-description, acceptance criteria, notes. Missing fields are normal — work with what
-is there.
+### Check the gates
 
-**Check the gates.** Stop and ask the user if any of these holds:
+Stop and ask the user if:
 
-- The ticket is already `Done`, `In Review` or similar.
-- A declared dependency is not satisfied, and you cannot confirm from the repository
-  that the dependency work already exists.
-- The acceptance criteria are too vague to review against. Ask for clarification
-  rather than inventing criteria.
+- The ticket is already `Done`, `In Review` or equivalent.
+- A declared dependency is unsatisfied and the repository does not demonstrate that the dependency work already exists.
+- Acceptance criteria are too vague to review objectively. Ask for clarification instead of inventing criteria.
+- The ticket requires a decision that cannot safely be made from repository conventions and explicit requirements.
 
-**Check the working tree.** Run `git status --short` and `git branch --show-current`.
+### Check repository state
 
-- Uncommitted changes are not automatically a blocker, but you must never discard,
-  stash or overwrite them without asking. Report what is already modified, and
-  confirm with the user before proceeding if the dirty files overlap the ticket's
-  likely scope.
-- If the current branch is `main`, `master` or another obvious default, say so and
-  ask whether to continue there or whether the user wants to switch branch first.
-  **Do not create a branch or a worktree yourself.**
+Run `git status --short --untracked-files=all` and `git branch --show-current`. Also inspect the recent commit style with `git log --oneline -10` when a completion report may need a commit-message suggestion.
+
+- Record the initial working-tree state. Do not attribute pre-existing changes to this ticket.
+- Uncommitted changes are not automatically a blocker. Report them, and ask before proceeding if any overlap the ticket's likely scope.
+- If the current branch is `main`, `master`, or another obvious default/protected branch, stop and ask whether to continue there or have the user switch first. Do not create branches or worktrees.
+- Never discard, stash, overwrite, reset, clean or otherwise rewrite pre-existing work.
 
 ---
 
@@ -76,174 +69,298 @@ is there.
 
 Build only the understanding this ticket needs.
 
-- Locate the modules, routes, handlers, models or components the ticket touches.
-  Use `Grep`/`Glob` to find them; read the few files that matter.
-- Read the repository's own instructions if present — `CLAUDE.md`, `AGENTS.md`,
-  `CONTRIBUTING.md`, a style guide in the area you are touching.
-- Find the real verification commands from `package.json` scripts, `Makefile`,
-  `pyproject.toml`, `justfile`, CI workflow, or equivalent. Record the exact
-  commands for test, lint, type-check and build. Do not invent commands.
-- Read one or two existing files that are close neighbours of the change, to learn
-  the conventions the worker must copy: error handling, test layout, naming,
-  response shapes.
-- Identify the architectural consequences and the risks: data shape changes, public
-  API changes, migrations, auth boundaries, backwards compatibility.
+- Locate relevant modules, routes, handlers, models or components using `Grep` and `Glob`; read only the files needed.
+- Read repository instructions when present: `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, and relevant local guidance.
+- Find real verification commands in `package.json`, `Makefile`, `pyproject.toml`, `justfile`, CI workflows or equivalent. Record exact commands for tests, lint, type-check and build where available. Do not invent commands.
+- Read one or two close neighbouring implementations/tests to identify conventions for naming, errors, response shapes and test layout.
+- Identify architectural consequences and risks: data-shape changes, public APIs, migrations, auth boundaries and backwards compatibility.
+- Determine the narrowest practical write scope. Include every file the worker may need to create or edit in the brief. Distinguish files it may edit from read-only context files.
 
-Stop exploring once you can name the files that will change and the patterns to
-follow. Do not read unrelated ADRs, other tickets, or broad product documentation.
+Stop exploring once you can name the files that will change and the patterns to follow. Do not read unrelated ADRs, tickets or broad product documentation.
 
 ---
 
 ## Phase 3 — Implementation brief
 
-Write a bounded, self-contained brief. The worker sees only this — it does not see
-the backlog, this conversation, or your exploration output.
+Write a bounded, self-contained brief. The worker receives this brief and the explicit worker constraints only; assume it does not see the backlog, this conversation or your exploration notes.
 
 Include exactly these sections:
 
-```
+```markdown
 # Ticket <ID> — <objective in one line>
 
 ## Acceptance criteria
-<only the criteria for this ticket, verbatim where possible>
+<only this ticket's criteria, verbatim where possible>
 
 ## Required behaviour
-<what the code must do, concretely>
+<concrete required behaviour>
 
 ## Non-goals
-<what must not change; name the traps you saw during exploration>
+<what must not change; include traps discovered during exploration>
 
 ## Files in scope
-<paths likely to change, and paths worth reading for context, each with one line of why>
+<explicitly label each path EDIT or READ-ONLY, with one line explaining why>
 
 ## Patterns to follow
-<named existing examples: "mirror the error shape in src/api/users.ts">
+<named existing examples, e.g. mirror the error shape in src/api/users.ts>
 
 ## Constraints and invariants
-<signatures that cannot change, data that cannot be lost, limits to respect>
+<signatures, data, compatibility, security, dependency and scope constraints>
 
 ## Expected tests
-<what the tests must cover and where they go>
+<behavioural tests to add/update and where>
 
 ## Verification commands
-<the exact commands, copied from the repository>
+<exact commands copied from the repository>
 
 ## Definition of done
 <a short checklist the worker can self-assess against>
 ```
 
-Rules for the brief:
+Brief rules:
 
-- Concrete over general. "Return 200 with `{status: "ok"}`" beats "return a healthy
-  response".
-- No speculation, no background that does not change the implementation, no business
-  context the worker cannot act on.
-- No full file contents unless a short excerpt is genuinely the clearest way to show
-  a pattern.
-- If writing the brief exposes a design decision, make it now and record it in the
-  brief. The worker must never have to choose an architecture.
+- Concrete beats general. Specify observable outcomes and edge cases.
+- Do not speculate or include background the worker cannot act on.
+- Do not paste full files unless a short excerpt is necessary to demonstrate a pattern.
+- Make design decisions here. The worker must not choose architecture.
+- The `Files in scope` section is an edit allowlist. Files marked READ-ONLY may be inspected but not changed.
+- If a new file is a legitimate implementation requirement, list its exact path as EDIT.
+- Include exact test/lint/type-check/build commands only when discovered. If a command does not exist, say `Not present in repository` rather than making one up.
 
 ---
 
 ## Phase 4 — Delegate implementation
 
-Invoke the `ticket-implementer` subagent, passing the brief as its prompt. Add any
-explicit constraints: files it may not touch, commands it may not run, a tool it
-should avoid.
+Invoke the `ticket-implementer` subagent through the `Agent` tool, using the subagent type `ticket-implementer`. Pass the complete brief.
 
-Say explicitly in the handover that the worker must not commit, must not change the
-backlog, must not expand scope, and must not spawn agents.
+The handover must explicitly state:
 
-Wait for its summary. Treat that summary as a **claim**, not as evidence.
+- This is the initial implementation pass (pass 1 of a maximum 3).
+- Only paths marked EDIT may be changed. READ-ONLY paths are context only.
+- Do not change the backlog or ticket status.
+- Do not commit, stage, push, merge, switch branches, create branches/worktrees, stash, reset or clean.
+- Do not install or modify dependencies unless the brief explicitly authorises the exact change.
+- Do not expand scope, make unresolved architecture decisions or spawn agents.
+- Run only the verification commands in the brief, plus narrowly scoped read-only inspection needed to understand a failure.
+- Return the structured worker result defined by the `ticket-implementer` agent.
+
+Wait for the worker. Treat its summary and claims as unverified until independently checked.
 
 ---
 
 ## Phase 5 — Review the actual changes
 
-Inspect the real diff. `git diff` and `git status --short` first, then read the
-changed files where the diff alone is not enough. Open the new tests and read what
-they actually assert.
+The worker's summary is not evidence. Review repository state independently.
 
-Review against all of:
+1. Run `git status --short --untracked-files=all`, `git diff --stat`, `git diff --`, and `git diff --cached` (if there are staged changes).
+2. Compare the current state with the Phase 1 baseline. Separate pre-existing changes from this ticket's changes.
+3. Inspect **every** changed tracked file and **every** untracked file attributable to this ticket. Ordinary `git diff` does not show untracked files; open/read each one directly. Do not overlook newly created source files, tests, fixtures or generated files.
+4. Confirm every edit is within the brief's EDIT allowlist. Any out-of-scope edit is blocking unless the user explicitly approves the scope change.
+5. Read the tests themselves. Do not infer test quality from filenames or the worker's summary.
 
-1. **Ticket requirements** — is the thing that was asked for actually built?
-2. **Acceptance criteria** — each one, individually, met or not met.
-3. **Architecture and design intent** — does it match the decisions in your brief?
-4. **Repository conventions** — does it look like the code around it?
-5. **Correctness** — edge cases, null/empty, concurrency, off-by-one, error paths.
-6. **Test quality** — do the tests fail if the implementation is wrong? Any test
-   that was weakened, skipped or deleted is a blocking issue.
-7. **Error handling** — failures surfaced properly, no swallowed exceptions.
-8. **Security** — injection, authz checks, secrets, unvalidated input, unsafe
-   deserialisation, dependency additions.
-9. **Scope discipline** — anything changed that the brief did not ask for.
-10. **Maintainability** — would the next person understand this?
+Review all of the following:
 
-Then run the verification commands yourself. If a command needs a permission you do
-not have, ask the user to run it and paste the output. Never assume a check passed.
+1. Ticket requirements — is the requested behaviour implemented?
+2. Acceptance criteria — assess each criterion individually.
+3. Architecture/design intent — does the change match the brief?
+4. Repository conventions — does it match neighbouring code?
+5. Correctness — edge cases, null/empty values, concurrency, off-by-one and error paths.
+6. Test quality — tests assert observable behaviour and would fail if the behaviour regressed. Weakening, skipping or deleting an existing test is blocking.
+7. Error handling — no swallowed failures or misleading success paths.
+8. Security — injection, authorization, secrets, unvalidated input, unsafe deserialization and dependency changes.
+9. Scope discipline — no unrequested edits, refactors or generated noise.
+10. Maintainability — the next engineer can understand the change.
 
-Reach a verdict: **accept** or **reject**.
+Then run the exact verification commands from the brief yourself, narrowed to the affected area only where the repository supports that and without changing the meaning of the check. Do not invent substitute commands. If a command needs permission, request it through normal Claude Code permission flow. If it cannot run, report it as NOT RUN and why. Never infer success.
+
+Reach a verdict: **ACCEPT** or **REJECT**. Acceptance requires every blocking criterion to pass and all required verification to pass, or an explicit, clearly documented reason a check is unavailable that the user accepts. Do not silently waive a failed check.
 
 ---
 
-## Phase 6 — Correction loop
+## Phase 6 — Bounded correction loop
 
-Budget: **three worker passes in total** — the Phase 4 implementation plus at most
-two corrections. Count them out loud so the user can see where you are.
+Budget: **three worker passes total** — initial implementation plus at most two correction passes. Announce the pass count in the user-facing progress/report.
 
-On rejection, produce a rejection report:
+On rejection, produce:
 
-```
+```markdown
 ## Blocking
-1. <file:line> — what is wrong, why it blocks, what correct looks like
+1. <file:line> — what is wrong, why it blocks, and the exact correction required
+
 ## Non-blocking
-- <improvements the user may want later; not sent to the worker>
+- <future improvement; do not send to the worker>
 ```
 
-Delegate **only the blocking items**. The correction handover contains: the original
-brief's acceptance criteria, the specific blocking issues, the files involved, and
-the verification commands. Do not resend your exploration notes or the full
-repository analysis.
+Delegate only the blocking items. The correction handover must include:
 
-Review the updated diff with the same rigour. Repeat until accepted or the budget is
-exhausted.
+- Original ticket ID and acceptance criteria.
+- The specific blocking issues, with file/line references where available.
+- Exact files the worker may edit for this correction.
+- Relevant verification commands.
+- Current pass number and remaining pass budget.
 
-**When the budget is exhausted, stop and report honestly:**
+Do not resend broad exploration notes or the full repository analysis. Do not let the worker address non-blocking suggestions.
 
-- Which acceptance criteria are still unmet.
-- What was attempted across the passes.
-- The relevant failing command output.
-- Whether the changes are safe to keep, safe to keep behind a flag, or should be
-  reverted — and the exact command to revert if that is your recommendation.
-- What a human should look at first.
+After each correction, repeat Phase 5 against the actual updated diff and rerun relevant verification. Also check that the correction did not regress previously accepted criteria.
 
-Never present failing verification as success. Never soften a failure into a
-"minor remaining item".
+When the budget is exhausted, stop and report honestly:
+
+- Acceptance criteria still unmet.
+- What was attempted in each pass.
+- Relevant failing command output.
+- Whether changes are safe to keep, safe only behind a flag, or should be reverted.
+- If recommending a revert, provide a precise command scoped only to this ticket's changes. Never execute it.
+- What a human should inspect first.
+
+Never present failing verification as success or soften a blocker into a minor concern.
 
 ---
 
-## Phase 7 — Completion
+## Phase 7 — Completion, commit gate and telemetry
+
+### Completion report
 
 On acceptance, report:
 
-- **Summary** — what was implemented, in two or three sentences.
-- **Files changed** — the list, with a line each.
-- **Verification** — test, lint, type-check and build results, each with its command
-  and outcome. **List every check you skipped and why.**
-- **Acceptance criteria** — each one, with met / not met.
+- **Summary** — two or three sentences.
+- **Files changed** — each path and purpose; separate pre-existing changes.
+- **Verification** — exact command and outcome for tests, lint, type-check and build. List every check skipped and why.
+- **Acceptance criteria** — each criterion marked MET / NOT MET with concise evidence.
 - **Worker passes used** — e.g. 2 of 3.
-- **Commit message** — a concise suggestion in the repository's existing style
-  (check `git log --oneline -10`).
+- **Commit message** — suggested in the repository's existing style, informed by `git log --oneline -10`.
 
-Then:
+If rejected or incomplete, use the honest failure report from Phase 6 instead; do not report acceptance.
 
-- If `--auto-commit` was passed, stage the changed files and commit. Otherwise **ask
-  before committing.**
-- Never push, never merge, and never commit onto a protected or default branch
-  without explicit confirmation in this turn.
-- If the ticket has an unambiguous status field, **propose** the exact edit, for
-  example `**Status:** Ready` → `**Status:** Done`, and apply it only once the user
-  agrees. Do not rewrite any other part of the backlog.
+### Commit gate
 
-Finish by stating that this invocation handled one ticket, and name the next ready
-ticket if there is one — without starting it.
+- Without `--auto-commit`, ask before staging or committing.
+- With `--auto-commit`, stage only the exact ticket files that were independently reviewed and accepted. Never stage unrelated or pre-existing changes. Inspect the staged diff before committing.
+- `--auto-commit` does not override the protected/default-branch safeguard. Do not commit on a protected/default branch without explicit confirmation in this turn.
+- Never push or merge.
+- Do not update the backlog or ticket status automatically. Propose the exact status edit and apply it only after the user agrees.
+
+### Structured telemetry contract
+
+Emit one valid JSON object in the final report under `## Ticket telemetry (JSON)`. This is a measurement record, not a narrative estimate. Use JSON `null` for unknown/unavailable values. Do not fabricate token counts, costs, model IDs, timestamps, pass counts or quality outcomes.
+
+Use this schema (add fields only compatibly; do not rename existing keys):
+
+```json
+{
+  "schema_version": "1.0",
+  "ticket_id": "PH-000",
+  "session": {
+    "session_id": null,
+    "started_at": null,
+    "completed_at": null,
+    "branch": null
+  },
+  "models": {
+    "orchestrator": {
+      "configured": null,
+      "resolved": null
+    },
+    "implementer": {
+      "configured": "haiku",
+      "resolved": null
+    }
+  },
+  "worker": {
+    "passes_used": null,
+    "correction_passes": null,
+    "rework_required": null
+  },
+  "outcome": {
+    "status": "accepted",
+    "acceptance_criteria_total": null,
+    "acceptance_criteria_met": null,
+    "blocking_issues_remaining": null,
+    "scope_violations": null,
+    "tests_added_or_changed": null,
+    "verification": {
+      "tests": "passed",
+      "lint": "not_run",
+      "typecheck": "not_run",
+      "build": "not_run"
+    }
+  },
+  "usage": {
+    "attribution_level": "per_phase",
+    "currency": "USD",
+    "phases": {
+      "planning": {
+        "model": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_creation_input_tokens": null,
+        "cost": null,
+        "source": "unavailable"
+      },
+      "implementation": {
+        "model": "haiku",
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_creation_input_tokens": null,
+        "cost": null,
+        "source": "unavailable"
+      },
+      "correction": {
+        "model": "haiku",
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_creation_input_tokens": null,
+        "cost": null,
+        "source": "unavailable"
+      },
+      "review": {
+        "model": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_creation_input_tokens": null,
+        "cost": null,
+        "source": "unavailable"
+      },
+      "verification": {
+        "model": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cache_read_input_tokens": null,
+        "cache_creation_input_tokens": null,
+        "cost": null,
+        "source": "unavailable"
+      }
+    },
+    "total": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "cache_read_input_tokens": null,
+      "cache_creation_input_tokens": null,
+      "cost": null,
+      "source": "unavailable"
+    },
+    "notes": []
+  }
+}
+```
+
+Telemetry rules:
+
+- `outcome.status` must be one of `accepted`, `rejected`, `blocked`, `incomplete`.
+- Verification values must be `passed`, `failed`, `not_run`, or `not_applicable`.
+- `worker.passes_used` counts actual worker invocations, maximum 3. `correction_passes` excludes the initial implementation pass.
+- `rework_required` is true if at least one correction pass was needed, false if none was needed, and null if unknown.
+- `scope_violations` counts actual worker edits outside the EDIT allowlist; use 0 only after checking tracked and untracked changes.
+- `acceptance_criteria_met` counts criteria independently verified as met, not criteria the worker claims to have met.
+- For usage, capture only values actually exposed by Claude Code/agent result metadata or an authoritative usage source available in the session. Keep the source name in `source` (for example `agent_result_metadata`, `claude_usage_api`, `claude_usage_session_estimate`, `manual_export`).
+- Do not use a session-wide `/usage` total as if it were per-phase or per-agent usage. If only an unattributed session total is available, set `attribution_level` to `session_unattributed`, place that aggregate only in `usage.total`, and explain the limitation in `notes`.
+- Claude Code's `/usage` dollar figure may be a local list-price estimate; do not call it authoritative billing. Label it `claude_usage_session_estimate`. If billing-grade cost is unavailable, say so.
+- If a value cannot be attributed to a phase/model, leave that phase field null. Never allocate totals proportionally or estimate phase costs.
+- `usage.attribution_level` must be `per_phase`, `per_model`, `session_unattributed`, or `unavailable`.
+- If telemetry cannot be obtained, still emit the complete JSON schema with null measurements and an explanatory note.
+- Do not claim that this skill automatically persists telemetry to a database or external service. The JSON object is the portable record for a later collector/dashboard.
+
+Finish by stating that this invocation handled exactly one ticket and, if discoverable without starting it, name the next ready ticket.
